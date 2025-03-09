@@ -69,15 +69,17 @@ jobs:
     
     - name: Verify required secrets
       run: |
-        REQUIRED_SECRETS=("API_ID" "API_HASH" "BOT_TOKEN")
         MISSING_SECRETS=()
         
-        for secret in "${REQUIRED_SECRETS[@]}"; do
-          secret_value=$(eval echo \${{ secrets.$secret }})
-          if [ -z "$secret_value" ]; then
-            MISSING_SECRETS+=("$secret")
-          fi
-        done
+        if [ -z "${{ secrets.API_ID }}" ]; then
+          MISSING_SECRETS+=("API_ID")
+        fi
+        if [ -z "${{ secrets.API_HASH }}" ]; then
+          MISSING_SECRETS+=("API_HASH")
+        fi
+        if [ -z "${{ secrets.BOT_TOKEN }}" ]; then
+          MISSING_SECRETS+=("BOT_TOKEN")
+        fi
         
         if [ ${#MISSING_SECRETS[@]} -ne 0 ]; then
           echo "::error::Missing required secrets: ${MISSING_SECRETS[*]}"
@@ -94,7 +96,9 @@ jobs:
         BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         # Add commonly used Telegram bot environment variables
         DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        DATABASE_NAME: ${{ secrets.DATABASE_NAME}}
+        DATABASE_NAME: ${{ secrets.DATABASE_NAME }}
+        # Add test duration as environment variable
+        TEST_DURATION_MINUTES: ${{ github.event.inputs.test_duration || '5' }}
       run: |
         echo "Starting Telegram bot test run..."
         echo "Python version: $(python --version)"
@@ -115,7 +119,7 @@ jobs:
         if [ -z "$BOT_FILE" ]; then
           echo "::warning::Could not find a standard bot entry file. Please specify file manually."
           echo "Looking for any Python file that imports pyrogram..."
-          POTENTIAL_FILES=$(grep -l "from pyrogram import" $(find . -name "*.py" | grep -v "__pycache__"))
+          POTENTIAL_FILES=$(grep -l "from pyrogram import" $(find . -name "*.py" | grep -v "__pycache__") 2>/dev/null || echo "")
           if [ -n "$POTENTIAL_FILES" ]; then
             BOT_FILE=$(echo "$POTENTIAL_FILES" | head -n 1)
             echo "Found potential bot file: $BOT_FILE"
@@ -183,6 +187,22 @@ jobs:
         echo "- **Duration**: ${{ github.event.inputs.test_duration || '5' }} minutes" >> $GITHUB_STEP_SUMMARY
         echo "- **Python Version**: ${{ github.event.inputs.python_version }}" >> $GITHUB_STEP_SUMMARY
         echo "- **Debug Mode**: ${{ github.event.inputs.debug_enabled }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Bot File Used**: $BOT_FILE" >> $GITHUB_STEP_SUMMARY
+        
+        # Make sure we have BOT_FILE defined for the summary
+        BOT_FILE="${{ github.event.inputs.bot_file }}"
+        if [ -z "$BOT_FILE" ]; then
+          for file in main.py bot.py app.py __main__.py run.py telegram_bot.py start.py; do
+            if [ -f "$file" ]; then
+              BOT_FILE="$file"
+              break
+            fi
+          done
+        fi
+        if [ -n "$BOT_FILE" ]; then
+          echo "- **Bot File Used**: $BOT_FILE" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "- **Bot File Used**: Not found" >> $GITHUB_STEP_SUMMARY
+        fi
+        
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "To stop this test run early, you can cancel the workflow from the Actions page." >> $GITHUB_STEP_SUMMARY
