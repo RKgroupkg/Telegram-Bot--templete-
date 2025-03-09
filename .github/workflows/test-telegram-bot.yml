@@ -1,17 +1,9 @@
 name: Test Telegram Bot
 
-# This workflow runs manually with start/stop controls
+# Simplified workflow that runs manually
 on:
   workflow_dispatch:
     inputs:
-      action:
-        description: 'Action to perform'
-        required: true
-        default: 'start'
-        type: choice
-        options:
-          - 'start'
-          - 'stop'
       debug_enabled:
         description: 'Enable debug logging'
         required: false
@@ -39,45 +31,11 @@ on:
         type: string
 
 jobs:
-  manage-test:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check action type
-        id: action-check
-        run: |
-          if [ "${{ github.event.inputs.action }}" == "stop" ]; then
-            echo "Canceling any running bot test workflows..."
-            gh workflow run cancel --workflow="Test Telegram Bot" --repo="${{ github.repository }}"
-            echo "All test runs canceled. To start a new test, use the 'start' action."
-            exit 0
-          fi
-          echo "Starting new bot test run..."
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Proceed with test
-        if: github.event.inputs.action == 'start'
-        uses: benc-uk/workflow-dispatch@v1
-        with:
-          workflow: Test Telegram Bot Run
-          token: ${{ secrets.GITHUB_TOKEN }}
-          inputs: |
-            {
-              "debug_enabled": ${{ github.event.inputs.debug_enabled }},
-              "test_duration": "${{ github.event.inputs.test_duration }}",
-              "python_version": "${{ github.event.inputs.python_version }}",
-              "bot_file": "${{ github.event.inputs.bot_file }}"
-            }
-
-  # This second workflow is needed due to GitHub Actions limitations
-  # It will be triggered by the first one when 'start' is selected
   test-bot:
-    name: Test Telegram Bot Run
     runs-on: ubuntu-latest
-    if: github.event.inputs.action == 'start' || github.event_name == 'workflow_dispatch'
     timeout-minutes: ${{ fromJSON(github.event.inputs.test_duration || '5') }}
     
-    # Add concurrency group to prevent multiple runs interfering with each other
+    # Add concurrency group to allow cancellation of previous runs
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}
       cancel-in-progress: true
@@ -108,19 +66,6 @@ jobs:
         fi
         # Install testing tools
         pip install pytest pytest-cov pylint
-
-    - name: Load environment from .env files
-      run: |
-        # Look for various environment file formats
-        ENV_FILES=(".env.example" ".env.sample" ".env.template" ".env.test")
-        for file in "${ENV_FILES[@]}"; do
-          if [ -f "$file" ]; then
-            echo "Found $file - using as template for environment setup"
-            # Convert to workflow environment file format and extract variable names
-            grep -v '^#' "$file" | grep -v '^$' | sed 's/=.*/=/' > env_vars.list
-            break
-          fi
-        done
     
     - name: Verify required secrets
       run: |
@@ -139,18 +84,6 @@ jobs:
           echo "Please add these secrets in your GitHub repository settings."
           exit 1
         fi
-    
-    - name: Run linting checks
-      run: |
-        echo "Running pylint basic syntax checks..."
-        pylint --disable=all --enable=E0001,E0100,E0101,E0102,E0103,E0104,E0105,E0106,E0107,E0108,E0110,E0111,E0112,E0113,E0114,E0115,E0116,E0117,E0118,E1127,E1132 $(find . -name "*.py" | grep -v "__pycache__" | grep -v ".venv" | grep -v "venv")
-        echo "Basic syntax check passed."
-    
-    - name: Create status file for monitoring
-      run: |
-        mkdir -p .github/status
-        echo "running" > .github/status/bot_status.txt
-        echo "Started at: $(date)" >> .github/status/bot_status.txt
     
     - name: Run Telegram bot
       id: run-bot
@@ -209,13 +142,6 @@ jobs:
         
         echo "Using bot file: $BOT_FILE"
         
-        # Check for test mode argument option
-        if grep -q "test[-_]mode" "$BOT_FILE"; then
-          TEST_ARG="--test-mode"
-        else
-          TEST_ARG=""
-        fi
-        
         # Create a wrapper script for timeout handling
         cat > run_with_timeout.sh << 'EOF'
         #!/bin/bash
@@ -246,21 +172,13 @@ jobs:
         echo "------- BOT OUTPUT LOG START -------"
         if [ "${{ github.event.inputs.debug_enabled }}" == "true" ]; then
           echo "Running in DEBUG mode"
-          ./run_with_timeout.sh "$BOT_FILE" --debug $TEST_ARG | tee bot_output.log
+          ./run_with_timeout.sh "$BOT_FILE" --debug | tee bot_output.log
         else
           echo "Running in NORMAL mode"
-          ./run_with_timeout.sh "$BOT_FILE" $TEST_ARG | tee bot_output.log
+          ./run_with_timeout.sh "$BOT_FILE" | tee bot_output.log
         fi
         echo "------- BOT OUTPUT LOG END -------"
       # Can be canceled at any time from the GitHub Actions UI
-      continue-on-error: true
-    
-    - name: Update status file
-      if: always()
-      run: |
-        echo "completed" > .github/status/bot_status.txt
-        echo "Ended at: $(date)" >> .github/status/bot_status.txt
-        echo "Status: ${{ steps.run-bot.outcome }}" >> .github/status/bot_status.txt
     
     - name: Upload logs
       if: always()  # Run even if previous steps failed
@@ -271,7 +189,6 @@ jobs:
           *.log
           logs/
           log/
-          .github/status/
         if-no-files-found: warn
     
     - name: Summarize test run
@@ -281,6 +198,6 @@ jobs:
         echo "- **Duration**: ${{ github.event.inputs.test_duration || '5' }} minutes" >> $GITHUB_STEP_SUMMARY
         echo "- **Python Version**: ${{ github.event.inputs.python_version }}" >> $GITHUB_STEP_SUMMARY
         echo "- **Debug Mode**: ${{ github.event.inputs.debug_enabled }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Status**: ${{ steps.run-bot.outcome }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Bot File Used**: $BOT_FILE" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "To stop this test run early, use the 'stop' action from the workflow dispatch page." >> $GITHUB_STEP_SUMMARY
+        echo "To stop this test run early, you can cancel the workflow from the Actions page." >> $GITHUB_STEP_SUMMARY
