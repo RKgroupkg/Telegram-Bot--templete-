@@ -52,6 +52,15 @@ jobs:
         python-version: ${{ github.event.inputs.python_version }}
         cache: 'pip'  # Automatically handle pip caching
     
+    - name: Sync system time
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ntp
+        sudo service ntp stop
+        sudo ntpd -gq
+        sudo service ntp start
+        echo "Current system time: $(date)"
+    
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip setuptools wheel
@@ -87,6 +96,33 @@ jobs:
           exit 1
         fi
     
+    - name: Create time offset script
+      run: |
+        # Create a Python script to handle time offset for Pyrogram
+        cat > set_time_offset.py << 'EOF'
+        import time
+        import pyrogram
+        
+        # Get the server time from Telegram
+        def set_time_offset():
+            try:
+                # Set an initial time offset to avoid the first error
+                pyrogram.session.session.Session.INITIAL_TIMEOUT = 30
+                # Add a small offset to prevent "msg_id too low" errors
+                pyrogram.session.session.Session.MAX_RETRIES = 5
+                
+                # Set a time offset to handle time sync issues
+                pyrogram.session.internals.MsgId.set_offset(10)
+                print("Set time offset for Pyrogram")
+            except Exception as e:
+                print(f"Failed to set time offset: {e}")
+        
+        if __name__ == "__main__":
+            set_time_offset()
+        EOF
+        
+        python set_time_offset.py
+    
     - name: Run Telegram bot
       id: run-bot
       env:
@@ -99,11 +135,14 @@ jobs:
         DATABASE_NAME: ${{ secrets.DATABASE_NAME }}
         # Add test duration as environment variable
         TEST_DURATION_MINUTES: ${{ github.event.inputs.test_duration || '5' }}
+        # Add a time offset for Pyrogram
+        PYTHONPATH: ${{ github.workspace }}
       run: |
         echo "Starting Telegram bot test run..."
         echo "Python version: $(python --version)"
         echo "Working directory: $(pwd)"
         echo "Test duration: $TEST_DURATION_MINUTES minutes"
+        echo "Current system time: $(date)"
         
         # Detect bot entry point file
         BOT_FILE="${{ github.event.inputs.bot_file }}"
@@ -138,7 +177,17 @@ jobs:
         echo "Running bot with ${TIMEOUT}s timeout..."
         
         # Start bot in background
-        python "$@" &
+        PYTHONPATH=$PYTHONPATH python -c "
+import pyrogram
+import sys
+import time
+# Set a time offset to handle time sync issues
+pyrogram.session.internals.MsgId.set_offset(10)
+# Run the bot file
+sys.path.insert(0, '.')
+with open('$1', 'r') as f:
+    exec(f.read())
+" ${@:2} &
         BOT_PID=$!
         
         # Create trap to handle cleanup
@@ -187,6 +236,7 @@ jobs:
         echo "- **Duration**: ${{ github.event.inputs.test_duration || '5' }} minutes" >> $GITHUB_STEP_SUMMARY
         echo "- **Python Version**: ${{ github.event.inputs.python_version }}" >> $GITHUB_STEP_SUMMARY
         echo "- **Debug Mode**: ${{ github.event.inputs.debug_enabled }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **System Time**: $(date)" >> $GITHUB_STEP_SUMMARY
         
         # Make sure we have BOT_FILE defined for the summary
         BOT_FILE="${{ github.event.inputs.bot_file }}"
