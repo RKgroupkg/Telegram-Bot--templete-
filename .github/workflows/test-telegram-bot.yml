@@ -95,21 +95,6 @@ jobs:
         # Add commonly used Telegram bot environment variables
         DATABASE_URL: ${{ secrets.DATABASE_URL }}
         DATABASE_NAME: ${{ secrets.DATABASE_NAME}}
-        WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
-        ADMIN_USER_IDS: ${{ secrets.ADMIN_USER_IDS }}
-        # Pass all secrets as environment variables
-        MONGODB_URI: ${{ secrets.MONGODB_URI }}
-        REDIS_URL: ${{ secrets.REDIS_URL }}
-        SESSION_STRING: ${{ secrets.SESSION_STRING }}
-        # Add workflow-specific variables
-        CI_TESTING: "true"
-        DEBUG_MODE: ${{ github.event.inputs.debug_enabled }}
-        # Testing duration for scripts that might need it
-        TEST_DURATION_MINUTES: ${{ github.event.inputs.test_duration || '5' }}
-        # Pass any other secrets that might exist
-        TELEGRAM_API_ID: ${{ secrets.API_ID }}
-        TELEGRAM_API_HASH: ${{ secrets.API_HASH }}
-        TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
       run: |
         echo "Starting Telegram bot test run..."
         echo "Python version: $(python --version)"
