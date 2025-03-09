@@ -1,0 +1,286 @@
+name: Test Telegram Bot
+
+# This workflow runs manually with start/stop controls
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'start'
+        type: choice
+        options:
+          - 'start'
+          - 'stop'
+      debug_enabled:
+        description: 'Enable debug logging'
+        required: false
+        default: false
+        type: boolean
+      test_duration:
+        description: 'Maximum test duration (minutes)'
+        required: false
+        default: '5'
+        type: string
+      python_version:
+        description: 'Python version'
+        required: false
+        default: '3.10'
+        type: choice
+        options:
+          - '3.9'
+          - '3.10'
+          - '3.11'
+          - '3.12'
+      bot_file:
+        description: 'Main bot file to run (if not auto-detected)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  manage-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check action type
+        id: action-check
+        run: |
+          if [ "${{ github.event.inputs.action }}" == "stop" ]; then
+            echo "Canceling any running bot test workflows..."
+            gh workflow run cancel --workflow="Test Telegram Bot" --repo="${{ github.repository }}"
+            echo "All test runs canceled. To start a new test, use the 'start' action."
+            exit 0
+          fi
+          echo "Starting new bot test run..."
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Proceed with test
+        if: github.event.inputs.action == 'start'
+        uses: benc-uk/workflow-dispatch@v1
+        with:
+          workflow: Test Telegram Bot Run
+          token: ${{ secrets.GITHUB_TOKEN }}
+          inputs: |
+            {
+              "debug_enabled": ${{ github.event.inputs.debug_enabled }},
+              "test_duration": "${{ github.event.inputs.test_duration }}",
+              "python_version": "${{ github.event.inputs.python_version }}",
+              "bot_file": "${{ github.event.inputs.bot_file }}"
+            }
+
+  # This second workflow is needed due to GitHub Actions limitations
+  # It will be triggered by the first one when 'start' is selected
+  test-bot:
+    name: Test Telegram Bot Run
+    runs-on: ubuntu-latest
+    if: github.event.inputs.action == 'start' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: ${{ fromJSON(github.event.inputs.test_duration || '5') }}
+    
+    # Add concurrency group to prevent multiple runs interfering with each other
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1  # Shallow clone for faster checkout
+    
+    - name: Set up Python ${{ github.event.inputs.python_version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ github.event.inputs.python_version }}
+        cache: 'pip'  # Automatically handle pip caching
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip setuptools wheel
+        if [ -f requirements.txt ]; then
+          pip install -r requirements.txt
+        elif [ -f setup.py ]; then
+          pip install -e .
+        else
+          echo "::warning::No requirements.txt or setup.py found. Please add one for proper dependency management."
+          # Install pyrogram as fallback since we know it's a pyrogram bot
+          pip install pyrogram tgcrypto
+        fi
+        # Install testing tools
+        pip install pytest pytest-cov pylint
+
+    - name: Load environment from .env files
+      run: |
+        # Look for various environment file formats
+        ENV_FILES=(".env.example" ".env.sample" ".env.template" ".env.test")
+        for file in "${ENV_FILES[@]}"; do
+          if [ -f "$file" ]; then
+            echo "Found $file - using as template for environment setup"
+            # Convert to workflow environment file format and extract variable names
+            grep -v '^#' "$file" | grep -v '^$' | sed 's/=.*/=/' > env_vars.list
+            break
+          fi
+        done
+    
+    - name: Verify required secrets
+      run: |
+        REQUIRED_SECRETS=("API_ID" "API_HASH" "BOT_TOKEN")
+        MISSING_SECRETS=()
+        
+        for secret in "${REQUIRED_SECRETS[@]}"; do
+          secret_value=$(eval echo \${{ secrets.$secret }})
+          if [ -z "$secret_value" ]; then
+            MISSING_SECRETS+=("$secret")
+          fi
+        done
+        
+        if [ ${#MISSING_SECRETS[@]} -ne 0 ]; then
+          echo "::error::Missing required secrets: ${MISSING_SECRETS[*]}"
+          echo "Please add these secrets in your GitHub repository settings."
+          exit 1
+        fi
+    
+    - name: Run linting checks
+      run: |
+        echo "Running pylint basic syntax checks..."
+        pylint --disable=all --enable=E0001,E0100,E0101,E0102,E0103,E0104,E0105,E0106,E0107,E0108,E0110,E0111,E0112,E0113,E0114,E0115,E0116,E0117,E0118,E1127,E1132 $(find . -name "*.py" | grep -v "__pycache__" | grep -v ".venv" | grep -v "venv")
+        echo "Basic syntax check passed."
+    
+    - name: Create status file for monitoring
+      run: |
+        mkdir -p .github/status
+        echo "running" > .github/status/bot_status.txt
+        echo "Started at: $(date)" >> .github/status/bot_status.txt
+    
+    - name: Run Telegram bot
+      id: run-bot
+      env:
+        # Access all your secret variables
+        API_ID: ${{ secrets.API_ID }}
+        API_HASH: ${{ secrets.API_HASH }}
+        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        # Add commonly used Telegram bot environment variables
+        DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        DATABASE_NAME: ${{ secrets.DATABASE_NAME}}
+        WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+        ADMIN_USER_IDS: ${{ secrets.ADMIN_USER_IDS }}
+        # Pass all secrets as environment variables
+        MONGODB_URI: ${{ secrets.MONGODB_URI }}
+        REDIS_URL: ${{ secrets.REDIS_URL }}
+        SESSION_STRING: ${{ secrets.SESSION_STRING }}
+        # Add workflow-specific variables
+        CI_TESTING: "true"
+        DEBUG_MODE: ${{ github.event.inputs.debug_enabled }}
+        # Testing duration for scripts that might need it
+        TEST_DURATION_MINUTES: ${{ github.event.inputs.test_duration || '5' }}
+        # Pass any other secrets that might exist
+        TELEGRAM_API_ID: ${{ secrets.API_ID }}
+        TELEGRAM_API_HASH: ${{ secrets.API_HASH }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      run: |
+        echo "Starting Telegram bot test run..."
+        echo "Python version: $(python --version)"
+        echo "Working directory: $(pwd)"
+        echo "Test duration: $TEST_DURATION_MINUTES minutes"
+        
+        # Detect bot entry point file
+        BOT_FILE="${{ github.event.inputs.bot_file }}"
+        if [ -z "$BOT_FILE" ]; then
+          for file in main.py bot.py app.py __main__.py run.py telegram_bot.py start.py; do
+            if [ -f "$file" ]; then
+              BOT_FILE="$file"
+              break
+            fi
+          done
+        fi
+        
+        if [ -z "$BOT_FILE" ]; then
+          echo "::warning::Could not find a standard bot entry file. Please specify file manually."
+          echo "Looking for any Python file that imports pyrogram..."
+          POTENTIAL_FILES=$(grep -l "from pyrogram import" $(find . -name "*.py" | grep -v "__pycache__"))
+          if [ -n "$POTENTIAL_FILES" ]; then
+            BOT_FILE=$(echo "$POTENTIAL_FILES" | head -n 1)
+            echo "Found potential bot file: $BOT_FILE"
+          else
+            echo "::error::No bot file found. Please specify the main bot file using the 'bot_file' input."
+            exit 1
+          fi
+        fi
+        
+        echo "Using bot file: $BOT_FILE"
+        
+        # Check for test mode argument option
+        if grep -q "test[-_]mode" "$BOT_FILE"; then
+          TEST_ARG="--test-mode"
+        else
+          TEST_ARG=""
+        fi
+        
+        # Create a wrapper script for timeout handling
+        cat > run_with_timeout.sh << 'EOF'
+        #!/bin/bash
+        TIMEOUT=$((${TEST_DURATION_MINUTES:-5} * 60))
+        echo "Running bot with ${TIMEOUT}s timeout..."
+        
+        # Start bot in background
+        python "$@" &
+        BOT_PID=$!
+        
+        # Create trap to handle cleanup
+        trap "echo 'Stopping bot...'; kill -SIGTERM $BOT_PID 2>/dev/null; exit 0" SIGINT SIGTERM
+        
+        # Wait for timeout or external cancellation
+        sleep $TIMEOUT &
+        SLEEP_PID=$!
+        wait $SLEEP_PID
+        
+        # Timeout reached, kill the bot
+        echo "Test duration reached, stopping bot..."
+        kill -SIGTERM $BOT_PID 2>/dev/null
+        exit 0
+        EOF
+        
+        chmod +x run_with_timeout.sh
+        
+        # Run with appropriate flags based on debug setting
+        echo "------- BOT OUTPUT LOG START -------"
+        if [ "${{ github.event.inputs.debug_enabled }}" == "true" ]; then
+          echo "Running in DEBUG mode"
+          ./run_with_timeout.sh "$BOT_FILE" --debug $TEST_ARG | tee bot_output.log
+        else
+          echo "Running in NORMAL mode"
+          ./run_with_timeout.sh "$BOT_FILE" $TEST_ARG | tee bot_output.log
+        fi
+        echo "------- BOT OUTPUT LOG END -------"
+      # Can be canceled at any time from the GitHub Actions UI
+      continue-on-error: true
+    
+    - name: Update status file
+      if: always()
+      run: |
+        echo "completed" > .github/status/bot_status.txt
+        echo "Ended at: $(date)" >> .github/status/bot_status.txt
+        echo "Status: ${{ steps.run-bot.outcome }}" >> .github/status/bot_status.txt
+    
+    - name: Upload logs
+      if: always()  # Run even if previous steps failed
+      uses: actions/upload-artifact@v4
+      with:
+        name: bot-logs-${{ github.run_id }}
+        path: |
+          *.log
+          logs/
+          log/
+          .github/status/
+        if-no-files-found: warn
+    
+    - name: Summarize test run
+      if: always()
+      run: |
+        echo "## Telegram Bot Test Summary" >> $GITHUB_STEP_SUMMARY
+        echo "- **Duration**: ${{ github.event.inputs.test_duration || '5' }} minutes" >> $GITHUB_STEP_SUMMARY
+        echo "- **Python Version**: ${{ github.event.inputs.python_version }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Debug Mode**: ${{ github.event.inputs.debug_enabled }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Status**: ${{ steps.run-bot.outcome }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "To stop this test run early, use the 'stop' action from the workflow dispatch page." >> $GITHUB_STEP_SUMMARY
