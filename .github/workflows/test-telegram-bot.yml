@@ -87,18 +87,6 @@ jobs:
           exit 1
         fi
     
-    - name: Create simple time offset for Pyrogram
-      run: |
-        cat > time_config.py << EOF
-        import pyrogram
-
-        # Simple time offset configuration (10 seconds)
-        pyrogram.session.internals.MsgId.set_offset(10)
-        print("Set time offset for Pyrogram")
-        EOF
-        
-        python time_config.py
-    
     - name: Run Telegram bot
       id: run-bot
       env:
@@ -146,50 +134,39 @@ jobs:
         echo "Using bot file: $BOT_FILE"
         
         # Create a wrapper script for timeout handling
-        cat > run_timeout.sh << "EOFSCRIPT"
-#!/bin/bash
-TIMEOUT=$((${TEST_DURATION_MINUTES:-5} * 60))
-echo "Running bot with ${TIMEOUT}s timeout..."
-
-# Execute bot with Pyrogram time offset
-python -c "
-import pyrogram
-import sys
-
-# Set time offset for Pyrogram
-pyrogram.session.internals.MsgId.set_offset(10)
-
-# Run the bot file
-sys.path.insert(0, '.')
-with open('$1', 'r') as f:
-    exec(f.read())
-" ${@:2} &
-BOT_PID=$!
-
-# Set up trap for cleanup
-trap 'echo "Stopping bot..."; kill -SIGTERM $BOT_PID 2>/dev/null; exit 0' SIGINT SIGTERM
-
-# Wait for timeout or external cancellation
-sleep $TIMEOUT &
-SLEEP_PID=$!
-wait $SLEEP_PID
-
-# Timeout reached, kill the bot
-echo "Test duration reached, stopping bot..."
-kill -SIGTERM $BOT_PID 2>/dev/null
-exit 0
-EOFSCRIPT
+        cat > run_with_timeout.sh << 'EOF'
+        #!/bin/bash
+        TIMEOUT=$((${TEST_DURATION_MINUTES:-5} * 60))
+        echo "Running bot with ${TIMEOUT}s timeout..."
         
-        chmod +x run_timeout.sh
+        # Run the bot file directly without the time sync code
+        python "$1" ${@:2} &
+        BOT_PID=$!
+        
+        # Create trap to handle cleanup
+        trap "echo 'Stopping bot...'; kill -SIGTERM $BOT_PID 2>/dev/null; exit 0" SIGINT SIGTERM
+        
+        # Wait for timeout or external cancellation
+        sleep $TIMEOUT &
+        SLEEP_PID=$!
+        wait $SLEEP_PID
+        
+        # Timeout reached, kill the bot
+        echo "Test duration reached, stopping bot..."
+        kill -SIGTERM $BOT_PID 2>/dev/null
+        exit 0
+        EOF
+        
+        chmod +x run_with_timeout.sh
         
         # Run with appropriate flags based on debug setting
         echo "------- BOT OUTPUT LOG START -------"
         if [ "${{ github.event.inputs.debug_enabled }}" == "true" ]; then
           echo "Running in DEBUG mode"
-          ./run_timeout.sh "$BOT_FILE" --debug | tee bot_output.log
+          ./run_with_timeout.sh "$BOT_FILE" --debug | tee bot_output.log
         else
           echo "Running in NORMAL mode"
-          ./run_timeout.sh "$BOT_FILE" | tee bot_output.log
+          ./run_with_timeout.sh "$BOT_FILE" | tee bot_output.log
         fi
         echo "------- BOT OUTPUT LOG END -------"
     
@@ -222,6 +199,7 @@ EOFSCRIPT
             fi
           done
         fi
+        
         if [ -n "$BOT_FILE" ]; then
           echo "- **Bot File Used**: $BOT_FILE" >> $GITHUB_STEP_SUMMARY
         else
